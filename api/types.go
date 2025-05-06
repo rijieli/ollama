@@ -108,6 +108,10 @@ type ChatRequest struct {
 
 	// Options lists model-specific options.
 	Options map[string]any `json:"options"`
+
+	// Thinking controls whether thinking/reasoning models will think before
+	// responding
+	Thinking bool `json:"thinking,omitempty"`
 }
 
 type Tools []Tool
@@ -241,6 +245,10 @@ type ChatResponse struct {
 
 	Done bool `json:"done"`
 
+	// ThinkingBlock contains the text that was inside <think> tags in the
+	// original model output when ChatRequest.Thinking was enabled.
+	ThinkingBlock string `json:"thinkingBlock,omitempty"`
+
 	Metrics
 }
 
@@ -275,6 +283,8 @@ type Options struct {
 	MirostatTau      float32  `json:"mirostat_tau,omitempty"`
 	MirostatEta      float32  `json:"mirostat_eta,omitempty"`
 	Stop             []string `json:"stop,omitempty"`
+
+	Thinking bool `json:"thinking,omitempty"`
 }
 
 // Runner options which must be set when the model is loaded into memory

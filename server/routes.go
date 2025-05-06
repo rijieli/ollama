@@ -1515,7 +1515,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	}
 	msgs = filterThinkTags(msgs, m)
 
-	prompt, images, err := chatPrompt(c.Request.Context(), m, r.Tokenize, opts, msgs, req.Tools)
+	prompt, images, err := chatPrompt(c.Request.Context(), m, r.Tokenize, opts, msgs, req.Tools, req.Thinking)
 	if err != nil {
 		slog.Error("chat prompt error", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1529,6 +1529,10 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		defer close(ch)
 		var sb strings.Builder
 		var toolCallIndex int = 0
+		var thinkingState thinkingParser = thinkingParser{
+			openingTag: "<think>",
+			closingTag: "</think>",
+		}
 		if err := r.Completion(c.Request.Context(), llm.CompletionRequest{
 			Prompt:  prompt,
 			Images:  images,
@@ -1548,6 +1552,16 @@ func (s *Server) ChatHandler(c *gin.Context) {
 				},
 			}
 
+			if req.Thinking {
+				thinkingContent, remainingContent := thinkingState.addContent(res.Message.Content)
+				if thinkingContent == "" && remainingContent == "" && !r.Done {
+					// need to accumulate more to decide what to send
+					return
+				}
+				res.Message.Content = remainingContent
+				res.ThinkingBlock = thinkingContent
+			}
+
 			if r.Done {
 				res.DoneReason = r.DoneReason.String()
 				res.TotalDuration = time.Since(checkpointStart)
@@ -1565,7 +1579,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 			// Streaming tool calls:
 			// If tools are recognized, use a flag to track the sending of a tool downstream
 			// This ensures that content is cleared from the message on the last chunk sent
-			sb.WriteString(r.Content)
+			sb.WriteString(res.Message.Content)
 			if toolCalls, ok := m.parseToolCalls(sb.String()); ok {
 				res.Message.ToolCalls = toolCalls
 				for i := range toolCalls {
@@ -1613,6 +1627,9 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		}
 
 		resp.Message.Content = sb.String()
+		if req.Thinking {
+			resp.Message.Content, resp.ThinkingBlock = extractThinking(resp.Message.Content)
+		}
 
 		if len(req.Tools) > 0 {
 			if toolCalls, ok := m.parseToolCalls(sb.String()); ok {
@@ -1644,6 +1661,32 @@ func handleScheduleError(c *gin.Context, name string, err error) {
 }
 
 var thinkTagRegexp = regexp.MustCompile(`<think>(?s).*?</think>(\n)*`)
+var thinkTagContentRegexp = regexp.MustCompile(`(?s)<think>(.*?)</think>(\n)*`)
+
+// extractThinking returns the provided text with any <think> blocks removed and
+// the concatenated contents extracted.
+// TODO(!!!)(drifkin): unify with the streaming version, so things like
+// whitespace are identical
+func extractThinking(text string) (string, string) {
+	matches := thinkTagContentRegexp.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, ""
+	}
+
+	var content strings.Builder
+	var thinking strings.Builder
+	last := 0
+	for _, m := range matches {
+		content.WriteString(text[last:m[0]])
+		if thinking.Len() > 0 {
+			thinking.WriteByte('\n')
+		}
+		thinking.WriteString(text[m[2]:m[3]])
+		last = m[1]
+	}
+	content.WriteString(text[last:])
+	return content.String(), thinking.String()
+}
 
 func filterThinkTags(msgs []api.Message, m *Model) []api.Message {
 	if m.Config.ModelFamily == "qwen3" || model.ParseName(m.Name).Model == "deepseek-r1" {

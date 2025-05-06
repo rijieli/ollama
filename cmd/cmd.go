@@ -38,6 +38,7 @@ import (
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/progress"
+	"github.com/ollama/ollama/readline"
 	"github.com/ollama/ollama/runner"
 	"github.com/ollama/ollama/server"
 	"github.com/ollama/ollama/types/model"
@@ -276,6 +277,13 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	opts.Format = format
+
+	thinkingFlag, err := cmd.Flags().GetBool("thinking")
+	if err != nil {
+		return err
+	}
+	opts.Thinking = thinkingFlag
+	fmt.Printf("$$$ thinkingFlag %t\n", thinkingFlag)
 
 	keepAlive, err := cmd.Flags().GetString("keepalive")
 	if err != nil {
@@ -876,6 +884,7 @@ type runOptions struct {
 	Options     map[string]any
 	MultiModal  bool
 	KeepAlive   *api.Duration
+	Thinking    bool
 }
 
 type displayResponseState struct {
@@ -931,6 +940,20 @@ func displayResponse(content string, wordWrap bool, state *displayResponseState)
 	}
 }
 
+func displayThinkingBlock(content string, wordWrap bool, state *displayResponseState) {
+	// fmt.Printf("$$$ content %s\n", content)
+	if content == "" {
+		return
+	}
+	const (
+		start = readline.ColorGrey + readline.ColorBold + "<think>" + readline.ColorDefault + readline.ColorGrey
+		end   = readline.ColorBold + "</think>" + readline.ColorDefault + "\n\n"
+	)
+	fmt.Print(start)
+	displayResponse(content, wordWrap, state)
+	fmt.Print(end)
+}
+
 func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
@@ -958,6 +981,8 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 	var latest api.ChatResponse
 	var fullResponse strings.Builder
 	var role string
+	var thinkTagOpened bool = false
+	var thinkTagClosed bool = false
 
 	fn := func(response api.ChatResponse) error {
 		p.StopAndClear()
@@ -965,7 +990,23 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 		latest = response
 
 		role = response.Message.Role
+		if response.ThinkingBlock != "" {
+			if !thinkTagOpened {
+				fmt.Print(readline.ColorGrey + readline.ColorBold + "<think>" + readline.ColorDefault + readline.ColorGrey)
+				thinkTagOpened = true
+			}
+			displayResponse(response.ThinkingBlock, opts.WordWrap, state)
+		}
+
 		content := response.Message.Content
+		if !thinkTagClosed && thinkTagOpened && content != "" {
+			fmt.Print(readline.ColorGrey + readline.ColorBold + "</think>" + readline.ColorDefault)
+			thinkTagClosed = true
+		}
+		// purposefully not putting thinking blocks in the response, which would
+		// only be needed if we later added tool calling to the cli (they get
+		// filtered out anyway since current models don't expect them unless you're
+		// about to finish some tool calls)
 		fullResponse.WriteString(content)
 
 		displayResponse(content, opts.WordWrap, state)
@@ -982,6 +1023,7 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 		Messages: opts.Messages,
 		Format:   json.RawMessage(opts.Format),
 		Options:  opts.Options,
+		Thinking: opts.Thinking,
 	}
 
 	if opts.KeepAlive != nil {
@@ -1290,6 +1332,8 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("insecure", false, "Use an insecure registry")
 	runCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 	runCmd.Flags().String("format", "", "Response format (e.g. json)")
+	// TODO(drifkin): what should happen for an unsupported model? Warning? Fail hard?
+	runCmd.Flags().Bool("thinking", false, "Turn on thinking mode for supported models")
 
 	stopCmd := &cobra.Command{
 		Use:     "stop MODEL",
